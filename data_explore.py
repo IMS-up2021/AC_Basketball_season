@@ -10,7 +10,8 @@ warnings.filterwarnings('ignore')
 # VISUALIZATION STYLE
 # ----------------------------------------------------------------------------
 sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 6)
+plt.rcParams['figure.figsize'] = (14, 7)
+plt.rcParams['font.size'] = 12
 
 print("="*80)
 print("PHASE 1: DATA UNDERSTANDING & EXPLORATION")
@@ -28,28 +29,18 @@ print("="*80)
 DATA_PATH = "data/"
 
 # Load all datasets from 'data' folder
-awards_players = pd.read_csv(f"{DATA_PATH}awards_players.csv")
-coaches = pd.read_csv(f"{DATA_PATH}coaches.csv")
-players = pd.read_csv(f"{DATA_PATH}players.csv")
-players_teams = pd.read_csv(f"{DATA_PATH}players_teams.csv")
-series_post = pd.read_csv(f"{DATA_PATH}series_post.csv")
-teams = pd.read_csv(f"{DATA_PATH}teams.csv")
-teams_post = pd.read_csv(f"{DATA_PATH}teams_post.csv")
-
-datasets = {
-    'awards_players': awards_players,
-    'coaches': coaches,
-    'players': players,
-    'players_teams': players_teams,
-    'series_post': series_post,
-    'teams': teams,
-    'teams_post': teams_post
-}
-
-print("\n✓ All datasets loaded successfully!\n")
-print("Dataset Dimensions:")
-for name, df in datasets.items():
-    print(f"  {name:20s}: {df.shape[0]:6d} rows × {df.shape[1]:3d} columns")
+try:
+    awards_players = pd.read_csv(f"{DATA_PATH}awards_players.csv")
+    coaches = pd.read_csv(f"{DATA_PATH}coaches.csv")
+    players = pd.read_csv(f"{DATA_PATH}players.csv")
+    players_teams = pd.read_csv(f"{DATA_PATH}players_teams.csv")
+    series_post = pd.read_csv(f"{DATA_PATH}series_post.csv")
+    teams = pd.read_csv(f"{DATA_PATH}teams.csv")
+    teams_post = pd.read_csv(f"{DATA_PATH}teams_post.csv")
+    print("\n ✓ All datasets loaded successfully!\n")
+except FileNotFoundError as e:
+    print(f"\nError: {e}. Make sure the 'data' folder and CSV files exist")
+    exit()
 
 # ============================================================================
 # STEP 1.2: INITIAL DATA EXPLORATION
@@ -58,70 +49,27 @@ print("\n" + "="*80)
 print("STEP 1.2: INITIAL DATA EXPLORATION")
 print("="*80)
 
-# --- AWARDS_PLAYERS Dataset ---
-print("\n" + "-"*80)
-print("1. AWARDS_PLAYERS Dataset")
-print("-"*80)
-print("\nFirst 5 rows:")
-print(awards_players.head())
-print("\nData Types:")
-print(awards_players.dtypes)
-print("\nMissing Values:")
-print(awards_players.isnull().sum())
-print("\nUnique Values:")
-print(f"  Unique Players: {awards_players['playerID'].nunique()}")
-print(f"  Unique Awards: {awards_players['award'].nunique()}")
-print(f"  Years Range: {awards_players['year'].min()} to {awards_players['year'].max()}")
-print(f"  Leagues: {awards_players['lgID'].unique()}")
+def explore_df(df, name):
+    # --- AWARDS_PLAYERS Dataset ---
+    print("\n" + "-"*80)
+    print(f"Exploring: {name} Dataset")
+    print("-"*80)
+    print(f"\nDimensions: {df.shape[0]} rows x {df.shape[1]} columns")
+    print("\nFirst 5 rows:")
+    print(df.head())
+    print("\nData Types:")
+    print(df.dtypes.to_string())
+    missing_values = df.isnull().sum()
+    print("\nMissing Values:")
+    if missing_values.sum() == 0:
+        print("No missing values found")
+    else:
+        print(missing_values[missing_values > 0])
 
-print("\nAward Types:")
-award_counts = awards_players['award'].value_counts()
-for award, count in award_counts.items():
-    print(f"  {award:45s}: {count:3d} occurrences")
-
-# --- COACHES Dataset ---
-print("\n" + "-"*80)
-print("2. COACHES Dataset")
-print("-"*80)
-print("\nFirst 5 rows:")
-print(coaches.head())
-print("\nData Types:")
-print(coaches.dtypes)
-print("\nMissing Values:")
-print(coaches.isnull().sum())
-print("\nBasic Statistics:")
-print(coaches[['won', 'lost', 'post_wins', 'post_losses']].describe())
-print(f"\nUnique Coaches: {coaches['coachID'].nunique()}")
-print(f"Unique Teams: {coaches['tmID'].nunique()}")
-print(f"Years Range: {coaches['year'].min()} to {coaches['year'].max()}")
-print(f"Teams: {sorted(coaches['tmID'].unique())}")
-
-# --- PLAYERS Dataset ---
-print("\n" + "-"*80)
-print("3. PLAYERS Dataset")
-print("-"*80)
-print("\nFirst 5 rows:")
-print(players.head())
-print("\nData Types:")
-print(players.dtypes)
-print("\nMissing Values:")
-missing_players = players.isnull().sum()
-print(missing_players[missing_players > 0])
-print(f"\nTotal Players: {len(players)}")
-print(f"Unique Positions: {players['pos'].unique()}")
-
-# Position distribution
-print("\nPosition Distribution:")
-pos_dist = players['pos'].value_counts()
-for pos, count in pos_dist.items():
-    print(f"  {pos:10s}: {count:4d} players")
-
-# Height and weight statistics (excluding missing values)
-print("\nPhysical Attributes (excluding missing):")
-print(f"  Height - Mean: {players['height'].mean():.1f} inches, "
-      f"Range: {players['height'].min():.0f} - {players['height'].max():.0f}")
-print(f"  Weight - Mean: {players['weight'].mean():.1f} lbs, "
-      f"Range: {players['weight'].min():.0f} - {players['weight'].max():.0f}")
+explore_df(awards_players, "Awards Players")
+explore_df(coaches, "Coaches")
+explore_df(players, "Players")
+explore_df(teams, "Teams")
 
 # ============================================================================
 # STEP 1.3: EXPLORATORY DATA ANALYSIS (EDA)
@@ -130,68 +78,74 @@ print("\n" + "="*80)
 print("STEP 1.3: EXPLORATORY DATA ANALYSIS")
 print("="*80)
 
-# --- Coach Performance Analysis ---
-print("\n" + "-"*80)
-print("COACH PERFORMANCE ANALYSIS")
-print("-"*80)
+# Merge awards with player details to analyze winners
+awards_details = pd.merge(awards_players, players, left_on='playerID', right_on='bioID', how='left')
 
-# Calculate win percentage for coaches
+coaches_with_teams = pd.merge(coaches, teams[['tmID', 'name']], on='tmID', how='left')
+
+print("✓ Merged 'awards' with 'players' for winner analysis")
+print("✓ Merged 'coaches' with 'teams' for team name context")
+
+print("\n" + "-"*80)
+print("Exploratory data analysis & visualizations")
+print("="*80)
+
+# Award winners analysis
+print("\nAnalyzing Award Winners...")
+
+plt.figure()
+award_counts = awards_details['award'].value_counts().nlargest(10)
+sns.barplot(x=award_counts.values, y=award_counts.index, palette='viridis', orient='h')
+plt.title('Top 10 Most Frequent Awards')
+plt.xlabel('Number of Times Awarded')
+plt.ylabel('Award')
+plt.tight_layout()
+plt.show()
+
+# Analyze the positions of MVP winners
+mvp_winners = awards_details[awards_details['award'] == 'Most Valuable Player']
+mvp_pos_counts = mvp_winners['pos'].value_counts()
+
+plt.figure()
+sns.barplot(x=mvp_pos_counts.index, y=mvp_pos_counts.values, palette='plasma')
+plt.title('Position Distribution of MVP Winners')
+plt.xlabel('Player Position')
+plt.ylabel('Number of MVP Awards')
+plt.show()
+
+print("\nMost Decorated Players (by total awards):")
+player_award_counts = awards_details['playerID'].value_counts().nlargest(5)
+print(player_award_counts)
+
+# Coach performance analysis
+print("\nAnalyzing Coach Performance...")
 coaches['win_pct'] = coaches['won'] / (coaches['won'] + coaches['lost'])
 coaches['games_coached'] = coaches['won'] + coaches['lost']
 
-print("\nTop 10 Coaches by Win Percentage (min 30 games):")
-top_coaches = coaches[coaches['games_coached'] >= 30].nlargest(10, 'win_pct')
-for _, row in top_coaches.iterrows():
-    print(f"  {row['coachID']:15s} | Year {row['year']} | "
-          f"Win%: {row['win_pct']:.3f} | W-L: {row['won']}-{row['lost']}")
+top_coaches = coaches[coaches['games_coached'] >= 34].nlargest(10, 'win_pct')
 
-# Coach turnover analysis
-print("\nCoach Tenure Analysis:")
-coach_seasons = coaches.groupby('coachID')['year'].agg(['count', 'min', 'max'])
-coach_seasons['tenure'] = coach_seasons['max'] - coach_seasons['min'] + 1
-print(f"  Average seasons per coach: {coach_seasons['count'].mean():.2f}")
-print(f"  Average tenure: {coach_seasons['tenure'].mean():.2f} years")
-print(f"  Longest tenure: {coach_seasons['tenure'].max():.0f} years")
+plt.figure()
+sns.barplot(x='win_pct', y='coachID', data=top_coaches, palette='magma')
+plt.title('Top 10 Coaches by Win Percentage (min 34 games)')
+plt.xlabel('Win Percentage')
+plt.ylabel('Coach ID')
+plt.xlim(0.6, 0.8)
+plt.tight_layout()
+plt.show()
 
-# --- Award Winners Analysis ---
-print("\n" + "-"*80)
-print("AWARD WINNERS ANALYSIS")
-print("-"*80)
+# Player Physical Attributes Analysis
+print("\nAnalyzing Player Physical Attributes...")
 
-# Most Valuable Player winners
-mvp_winners = awards_players[awards_players['award'] == 'Most Valuable Player']
-print("\nMost Valuable Player Winners:")
-for _, row in mvp_winners.iterrows():
-    print(f"  Year {row['year']:2d}: {row['playerID']}")
+fig, axes = plt.subplots(1, 2, figsize = (16,6))
+sns.histplot(players['height'].dropna(), kde=True, ax=axes[0], color='skyblue')
+axes[0].set_title('Distribution of Player Height (inches)')
+axes[0].set_xlabel('Height (inches)')
 
-# Players with multiple awards
-player_awards = awards_players.groupby('playerID').size()
-multi_award_winners = player_awards[player_awards > 1].sort_values(ascending=False)
-print("\nTop 10 Players by Total Awards:")
-for player, count in multi_award_winners.head(10).items():
-    player_award_types = awards_players[awards_players['playerID'] == player]['award'].unique()
-    print(f"  {player:15s}: {count:2d} awards")
-    for award in player_award_types:
-        award_count = len(awards_players[(awards_players['playerID'] == player) &
-                                         (awards_players['award'] == award)])
-        print(f"    - {award}: {award_count}x")
-
-# --- Temporal Trends ---
-print("\n" + "-"*80)
-print("TEMPORAL TRENDS")
-print("-"*80)
-
-# Awards over time
-print("\nAwards Distribution by Year:")
-awards_by_year = awards_players.groupby('year').size()
-for year, count in awards_by_year.items():
-    print(f"  Year {year:2d}: {count:2d} awards")
-
-# Coach changes per year
-print("\nUnique Coaches per Year:")
-coaches_by_year = coaches.groupby('year')['coachID'].nunique()
-for year, count in coaches_by_year.items():
-    print(f"  Year {year:2d}: {count:2d} coaches")
+sns.histplot(players['weight'].dropna(), kde=True, ax=axes[1], color='salmon')
+axes[1].set_title('Distribution of Player Weight (lbs)')
+axes[1].set_xlabel('Weight (lbs)')
+plt.tight_layout()
+plt.show()
 
 # ============================================================================
 # SUMMARY & KEY INSIGHTS
@@ -201,30 +155,17 @@ print("KEY INSIGHTS & OBSERVATIONS")
 print("="*80)
 
 print("\n1. DATA CHARACTERISTICS:")
-print(f"   • League: {awards_players['lgID'].unique()[0]} (WNBA)")
-print(f"   • Time Period: Years {awards_players['year'].min()}–{awards_players['year'].max()}")
-print(f"   • Teams: {coaches['tmID'].nunique()} unique team codes")
-print(f"   • Coaches: {coaches['coachID'].nunique()} unique coaches")
-print(f"   • Players: {players['bioID'].nunique()} unique players")
+print(f"   • The data primarly covers the {awards_players['lgID'].unique()[0]} league.")
+print(f" • The analysis spans from {awards_players['year'].min()} to {awards_players['year'].max()}") 
 
-print("\n2. AWARD CATEGORIES IDENTIFIED:")
-awards_list = awards_players['award'].unique()
-for i, award in enumerate(awards_list, 1):
-    print(f"   {i}. {award}")
+print("\n2. PLAYER INSIGHTS:")
+print(f" • The MVP award is predominantly won by players in the '{mvp_pos_counts.index[0]}' position.")
+print(f" • Player heights show a normal distribution, peaking around {players['height'].median():.0f} inches")
 
-print("\n3. MISSING DATA ISSUES:")
-print("   • Players dataset: Missing height/weight for some entries")
-print("   • Coaches dataset: Some missing postseason stats (expected)")
-print("   • Need to validate joins with teams and players_teams")
-
-print("\n4. COACH TURNOVER PATTERNS:")
-print(f"   • Average coach tenure: {coach_seasons['tenure'].mean():.1f} years")
-print(f"   • Some coaches have multiple stints (stint column)")
-
-print("\n5. NEXT STEPS:")
-print("   • Explore relationships between datasets (player-team-season mappings)")
-print("   • Build features for prediction tasks (e.g., win %, award likelihood)")
-print("   • Visualize correlations and trends using matplotlib/seaborn")
+print("\n3. COACHING PATTERNS:")
+print(f"   • A small group of elite coaches consistently achieve high win percentages (often > 70%)")
+coach_seasons = coaches.groupby('coachID')['year'].count()
+print(f"   • The average number of seasons coached is {coach_seasons.mean():.2f}, indicating relatively high turnover")
 
 print("\n" + "="*80)
 print("PHASE 1 COMPLETE!")

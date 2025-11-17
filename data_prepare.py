@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import os
-import warnings
-warnings.filterwarnings('ignore')
 
 # ============================================================================
 # CONFIGURATION
@@ -28,6 +26,7 @@ def load_datasets(path):
             'players_teams' : pd.read_csv(f"{path}players_teams.csv"),
             'teams' : pd.read_csv(f"{path}teams.csv")
         }
+        return datasets
     except FileNotFoundError as e:
         print(f"Error: {e}. Ensure all CSV files are in the '{path}' directory")
         return None
@@ -156,8 +155,8 @@ def integrate_data(datasets, config):
     print("\nMerging player and team data...")
     full_dataset = datasets['players_teams'].merge(datasets['players'], on='playerID', how='left')
 
-    print("Adding coach data...")
-    full_dataset = full_dataset.merge(datasets['coaches'], on=['tmID', 'year', 'coachID'], how='left')
+    full_dataset = full_dataset.merge(
+    datasets['coaches'][['coachID','tmID','year','win_pct','post_win_pct','tenure_years','is_new_coach']], on=['tmID', 'year'], how='left')
 
     print("Integrating team metadata...")
     full_dataset = full_dataset.merge(datasets['teams'][['tmID', 'lgID', 'franchID', 'name']], on='tmID', how='left')

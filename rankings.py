@@ -130,7 +130,7 @@ plt.close()
 print(f"Saved feature importance plot to {plot_dir}/ranking_feature_importance.png")
 
 # =========================================================
-# STEP 3.8: PREDICT SEASON 10 (INSTEAD OF 11)
+# STEP 3.8: PREDIÇÃO DO ANO 10
 # =========================================================
 
 target_year = 10
@@ -141,7 +141,7 @@ stats_prev_year = team_df[team_df['year'] == previous_year].copy()
 actual_year_data = team_df[team_df['year'] == target_year][['tmID','conference','win_pct']].copy()
 actual_year_data.rename(columns={'win_pct':'actual_win_pct'}, inplace=True)
 
-# Build prediction input
+# Prediction input
 pred_features = {}
 for col in feature_cols:
     pred_features[f'prev_{col}'] = stats_prev_year[col].values
@@ -156,8 +156,8 @@ stats_prev_year['predicted_wins'] = (stats_prev_year['predicted_win_pct'] * 34).
 stats_prev_year['rank'] = stats_prev_year.groupby('conference')['predicted_wins'] \
                                          .rank(ascending=False, method='dense')
 
-# Compare with real results
-comparison_df = stats_prev_year[['tmID','conference','predicted_win_pct','predicted_wins']].merge(
+# Compare with real
+comparison_df = stats_prev_year[['tmID','conference','predicted_win_pct','predicted_wins','rank']].merge(
     actual_year_data,
     on=['tmID','conference'],
     how='left'
@@ -190,6 +190,29 @@ plt.savefig(f"{plot_dir}/season10_pred_vs_actual.png")
 plt.close()
 
 print(f"\n📈 Gráfico guardado em: {plot_dir}/season10_pred_vs_actual.png")
+
+# =========================================================
+# STEP 3.10: SAVE RESULTS FOR SEASON 10
+# =========================================================
+
+comparison_df = comparison_df.sort_values(['conference', 'rank'], ascending=[True, True])
+
+output_cols = ['conference', 'tmID', 'predicted_wins', 'predicted_win_pct', 'rank']
+
+comparison_df[output_cols].to_csv("results/predicted_season10_rankings.csv", index=False)
+
+print("\n💾 Saved Season 10 Rankings to results/predicted_season10_rankings.csv")
+
+comparison_full_cols = [
+    'conference', 'tmID',
+    'predicted_win_pct', 'predicted_wins',
+    'actual_win_pct', 'actual_wins',
+    'rank'
+]
+
+comparison_df[comparison_full_cols].to_csv("results/season10_comparison_full.csv", index=False)
+
+print("💾 Saved full Season 10 comparison (predicted vs actual) to results/season10_comparison_full.csv")
 
 # =========================================================
 # DONE

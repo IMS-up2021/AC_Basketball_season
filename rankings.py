@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score
 
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (10,6)
@@ -64,20 +64,17 @@ feature_cols = [
 # STEP 3.4: LAG GENERATION
 # =========================================================
 print("\n Generating Lag Features (Year N-1 -> Year N)...")
-
 team_df = team_df.sort_values(['tmID', 'year'])
 
 for col in feature_cols:
     team_df[f'prev_{col}'] = team_df.groupby('tmID')[col].shift(1)
 
 model_df = team_df.dropna(subset=[f'prev_{col}' for col in feature_cols])
-
 print(f"Dataset reduced from {len(team_df)} to {len(model_df)} rows after lag creation")
 
 # =========================================================
 # STEP 3.5: MODEL TRAINING
 # =========================================================
-
 X = model_df[[f'prev_{col}' for col in feature_cols]]
 y = model_df['win_pct']
 
@@ -89,7 +86,6 @@ model.fit(X_train, y_train)
 y_pred = model.predict(X_test)
 mae = mean_absolute_error(y_test, y_pred)
 r2 = r2_score(y_test, y_pred)
-
 print(f"\n📊 Model Performance: MAE={mae:.4f}, R2={r2:.4f}")
 
 # =========================================================
@@ -100,7 +96,6 @@ os.makedirs(plot_dir, exist_ok=True)
 
 plt.figure(figsize=(8,8))
 sns.scatterplot(x=y_test, y=y_pred, alpha=0.6, color='blue')
-
 plt.plot([0,1], [0,1], 'r--', label='Perfect Prediction')
 plt.xlabel('Actual Win %')
 plt.ylabel('Predicted Win %')
@@ -109,7 +104,6 @@ plt.legend()
 plt.tight_layout()
 plt.savefig(f"{plot_dir}/ranking_model_performance.png")
 plt.close()
-
 print(f"Saved model performance plot to {plot_dir}/ranking_model_performance.png")
 
 # =========================================================
@@ -126,38 +120,39 @@ plt.title('Feature Importance: Drivers of Next Season Success')
 plt.tight_layout()
 plt.savefig(f"{plot_dir}/ranking_feature_importance.png")
 plt.close()
-
 print(f"Saved feature importance plot to {plot_dir}/ranking_feature_importance.png")
 
 # =========================================================
 # STEP 3.8: PREDIÇÃO DO ANO 10
 # =========================================================
-
 target_year = 10
 previous_year = target_year - 1
 
 stats_prev_year = team_df[team_df['year'] == previous_year].copy()
-
 actual_year_data = team_df[team_df['year'] == target_year][['tmID','conference','win_pct']].copy()
 actual_year_data.rename(columns={'win_pct':'actual_win_pct'}, inplace=True)
 
-# Prediction input
-pred_features = {}
-for col in feature_cols:
-    pred_features[f'prev_{col}'] = stats_prev_year[col].values
-
+pred_features = {f'prev_{col}': stats_prev_year[col].values for col in feature_cols}
 X_future = pd.DataFrame(pred_features)
 
-# Predict year 10
 stats_prev_year['predicted_win_pct'] = model.predict(X_future)
 stats_prev_year['predicted_wins'] = (stats_prev_year['predicted_win_pct'] * 34).round(0)
 
-# Ranking
-stats_prev_year['rank'] = stats_prev_year.groupby('conference')['predicted_wins'] \
-                                         .rank(ascending=False, method='dense')
+# =========================================================
+# STEP 3.9: CREATE RANKINGS (Predicted + Actual with desempate)
+# =========================================================
+# Ordena por predicted_wins DESC e desempata pelo predicted_win_pct DESC
+stats_prev_year = stats_prev_year.sort_values(
+    ['conference', 'predicted_wins', 'predicted_win_pct'],
+    ascending=[True, False, False]
+)
 
-# Compare with real
-comparison_df = stats_prev_year[['tmID','conference','predicted_win_pct','predicted_wins','rank']].merge(
+# Calcula predicted_rank (Opção B) com desempate pelo predicted_win_pct usando 'first'
+stats_prev_year['predicted_rank'] = stats_prev_year.groupby('conference')['predicted_wins'] \
+    .rank(method='first', ascending=False).astype(int)
+
+# Merge com actual
+comparison_df = stats_prev_year[['tmID','conference','predicted_win_pct','predicted_wins','predicted_rank']].merge(
     actual_year_data,
     on=['tmID','conference'],
     how='left'
@@ -165,13 +160,22 @@ comparison_df = stats_prev_year[['tmID','conference','predicted_win_pct','predic
 
 comparison_df['actual_wins'] = (comparison_df['actual_win_pct'] * 34).round(0)
 
+# Ranking real (Opção A)
+comparison_df['actual_rank'] = comparison_df.groupby('conference')['actual_wins'] \
+    .rank(method='min', ascending=False).fillna(0).astype(int)
+
+# Diferença de ranking
+comparison_df['rank_diff'] = comparison_df['predicted_rank'] - comparison_df['actual_rank']
+
+# Ordena por conferência e predicted_rank
+comparison_df = comparison_df.sort_values(['conference','predicted_rank'])
+
 print("\n📊 Comparação Ano 10 (Predicted vs Actual):")
-print(comparison_df[['tmID','conference','predicted_wins','actual_wins']])
+print(comparison_df[['tmID','conference','predicted_wins','actual_wins','predicted_rank','actual_rank','rank_diff']])
 
 # =========================================================
-# STEP 3.9: SCATTER PLOT – PREDICTED VS ACTUAL YEAR 10
+# STEP 3.10: PLOT PREDICTED VS ACTUAL
 # =========================================================
-
 plt.figure(figsize=(10,6))
 sns.scatterplot(
     x=comparison_df['actual_win_pct'],
@@ -179,7 +183,6 @@ sns.scatterplot(
     hue=comparison_df['conference'],
     s=120
 )
-
 plt.plot([0,1], [0,1], 'r--', label='Perfect Fit Line (y = x)')
 plt.xlabel('Actual Win % (Season 10)')
 plt.ylabel('Predicted Win % (Season 10)')
@@ -188,34 +191,53 @@ plt.legend()
 plt.tight_layout()
 plt.savefig(f"{plot_dir}/season10_pred_vs_actual.png")
 plt.close()
-
 print(f"\n📈 Gráfico guardado em: {plot_dir}/season10_pred_vs_actual.png")
 
 # =========================================================
-# STEP 3.10: SAVE RESULTS FOR SEASON 10
+# STEP 3.11: SAVE RESULTS
 # =========================================================
+# Ranking único (Opção B)
+ranking_cols = ['conference','tmID','predicted_wins','predicted_win_pct','predicted_rank']
+comparison_df[ranking_cols].to_csv("results/predicted_season10_rankings.csv", index=False)
 
-comparison_df = comparison_df.sort_values(['conference', 'rank'], ascending=[True, True])
+# Full comparison (Opção A)
+full_cols = ['conference','tmID','predicted_win_pct','predicted_wins','actual_win_pct','actual_wins','predicted_rank','actual_rank','rank_diff']
+comparison_df[full_cols].to_csv("results/season10_comparison_full.csv", index=False)
 
-output_cols = ['conference', 'tmID', 'predicted_wins', 'predicted_win_pct', 'rank']
+print("\n💾 Saved Season 10 Rankings and full comparison CSVs")
 
-comparison_df[output_cols].to_csv("results/predicted_season10_rankings.csv", index=False)
 
-print("\n💾 Saved Season 10 Rankings to results/predicted_season10_rankings.csv")
 
-comparison_full_cols = [
-    'conference', 'tmID',
-    'predicted_win_pct', 'predicted_wins',
-    'actual_win_pct', 'actual_wins',
-    'rank'
-]
+# =========================================================
+# STEP 3.12: PLOT RANK_DIFF POR CONFERÊNCIA
+# =========================================================
+plt.figure(figsize=(12,6))
 
-comparison_df[comparison_full_cols].to_csv("results/season10_comparison_full.csv", index=False)
+# Cores: verde se previsão foi melhor que real (rank_diff < 0), vermelho se pior (rank_diff > 0)
+comparison_df['color'] = comparison_df['rank_diff'].apply(lambda x: 'green' if x < 0 else ('red' if x > 0 else 'gray'))
 
-print("💾 Saved full Season 10 comparison (predicted vs actual) to results/season10_comparison_full.csv")
+sns.barplot(
+    x='tmID',
+    y='rank_diff',
+    hue='conference',
+    data=comparison_df,
+    dodge=False,
+    palette=comparison_df['color'].to_list()
+)
+
+plt.axhline(0, color='black', linestyle='--')
+plt.xlabel('Team')
+plt.ylabel('Predicted Rank - Actual Rank')
+plt.title('Season 10 – Rank Difference (Predicted vs Actual)')
+plt.legend(title='Conference')
+plt.tight_layout()
+plt.savefig(f"{plot_dir}/season10_rank_diff.png")
+plt.close()
+
+print(f"\n📈 Gráfico de rank_diff guardado em: {plot_dir}/season10_rank_diff.png")
+
 
 # =========================================================
 # DONE
 # =========================================================
-
-print("\n✅ Completed: Season 10 prediction + real comparison + plots generated.")
+print("\n✅ Completed: Season 10 prediction + real comparison + rankings improved (desempate pelo predicted_win_pct).")

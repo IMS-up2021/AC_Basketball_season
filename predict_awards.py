@@ -170,7 +170,7 @@ mip_features = ['efficiency_delta', 'points_pg', 'efficiency', 'minutes']
 predict_award('Most Improved Player', mip_features, lambda x: x['experience_years'] > 0)
 
 results_df = pd.DataFrame(prediction_summary)
-csv_path = f"{output_dir}/season_11_award_predictions.csv"
+csv_path = f"{output_dir}/season_10_award_predictions.csv"
 results_df.to_csv(csv_path, index=False)
 print(f"\nResults saved to: {csv_path}")
 print(results_df)

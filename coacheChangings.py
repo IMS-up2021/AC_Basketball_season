@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, precision_recall_curve
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -29,11 +29,17 @@ except FileNotFoundError as e:
 # =========================================================
 print("Engineering Features...")
 
-coaches_df.sort_values(['tmID', 'year'], inplace=True)
+coaches_df = coaches_df.sort_values(['tmID', 'year', 'stint'])
+coaches_df = coaches_df.drop_duplicates(subset=['tmID', 'year'], keep='last').copy()
 
+coaches_df.sort_values(['tmID', 'year'], inplace=True)
 coaches_df['next_coachID'] = coaches_df.groupby('tmID')['coachID'].shift(-1)
-model_df = coaches_df.dropna(subset=['next_coachID']).copy()
+
+model_df = coaches_df.copy()
+
 model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(int)
+
+model_df['made_playoffs'] = np.where((model_df['post_wins'] + model_df['post_losses']) > 0, 1, 0)
 
 model_df['prev_wins'] = model_df.groupby('tmID')['won'].shift(1)
 model_df['delta_wins'] = model_df['won'] - model_df['prev_wins']
@@ -86,7 +92,7 @@ model_df['roster_churn'] = model_df['roster_churn'].fillna(0)
 
 features = [
     'win_pct',
-    'post_win_pct',
+    'made_playoffs',
     'tenure_years',
     'performance_trend',
     'delta_wins',
@@ -96,13 +102,14 @@ features = [
 ]
 target = 'coach_change'
 
-model_df['performance_trend'] = model_df['performance_trend'].fillna(0)
-model_df['post_win_pct'] = model_df['post_win_pct'].fillna(0)
 model_df = model_df.dropna(subset=features)
 
 latest_season = model_df['year'].max()
-train_df = model_df[model_df['year'] < latest_season]
-test_df = model_df[model_df['year'] == latest_season]
+
+train_df = model_df[model_df['year'] < latest_season].copy()
+test_df = model_df[model_df['year'] == latest_season].copy()
+
+train_df = train_df.dropna(subset=['next_coachID'])
 
 X_train = train_df[features]
 y_train = train_df[target]
@@ -113,20 +120,20 @@ print(f"Treino: {len(X_train)} amostras (épocas até {int(latest_season-1)})")
 print(f"Teste: {len(X_test)} amostras (época {int(latest_season)})")
 
 # =========================================================
-# STEP 4: TRAINING & THRESHOLDING
+# STEP 4: TRAINING 
 # =========================================================
-print("\n Treinando o modelo de classificação...")
+print("\n Training Random Forest Classifier...")
 
-rf = RandomForestClassifier(n_estimators=300, random_state=42, class_weight='balanced', max_depth=6)
+rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=8)
 rf.fit(X_train, y_train)
 
-print("Modelo treinado com sucesso!")
+print("Model trained successfully!")
 
-print("\n Avaliando o desempenho do modelo...")
+print("\n Evaluating model performance...")
 
 y_prob = rf.predict_proba(X_test)[:, 1]
 
-THRESHOLD = 0.30
+THRESHOLD = 0.40
 y_pred_custom = (y_prob >= THRESHOLD).astype(int)
 
 # =========================================================
@@ -140,7 +147,7 @@ cm = confusion_matrix(y_test, y_pred_custom, labels=[0,1])
 sns.heatmap(cm, annot=True, fmt='d', cmap='Reds', xticklabels=['Safe', 'Fired'], yticklabels=['Safe', 'Fired'])
 plt.ylabel('Actual')
 plt.xlabel('Predicted')
-plt.title('Matriz de confusão')
+plt.title(f'Confusion Matrix (Threshold {THRESHOLD})')
 plt.tight_layout()
 plt.savefig("results/plots/coach_churn_confusion_matrix.png")
 plt.show()
@@ -162,8 +169,8 @@ importances = pd.DataFrame({
 
 plt.figure(figsize=(10,6))
 sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis')
-plt.title('Importância das features para prever mudança de treinador')
-plt.xlabel('Importância')
+plt.title('Feature Importance: Coach Changes')
+plt.xlabel('Importance')
 plt.ylabel('Feature')
 plt.tight_layout()
 plt.savefig("results/plots/coach_firing_factors.png")

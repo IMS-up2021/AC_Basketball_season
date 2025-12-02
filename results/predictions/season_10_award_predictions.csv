@@ -1,0 +1,6 @@
+Award,Predicted Winner,Prob,Actual Winner,Correct
+Most Valuable Player,JACKSLA01W,0.12,TAURADI01W,NO
+Rookie of the Year,BONNEDE01W,0.09,MCCOUAN01W,NO
+Defensive Player of the Year,CATCHTA01W,0.38,CATCHTA01W,YES
+Sixth Woman of the Year,ZELLOSH01W,0.10,BONNEDE01W,NO
+Most Improved Player,LANGHCR01W,0.29,LANGHCR01W,YES

@@ -1,56 +1,108 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+import os
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, precision_recall_curve
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+#Setup
+sns.set_style("whitegrid")
+os.makedirs("results/predictions", exist_ok=True)
+os.makedirs("results/plots", exist_ok=True)
+
+# =========================================================
+# STEP 1: LOAD DATA
+# =========================================================
+print("Loading data...")
 try:
-    df = pd.read_csv("data/cleaned/coaches_cleaned.csv")
-    print(f"Dados dos treinadores carregados com sucesso. Dimensão: {df.shape}")
-except FileNotFoundError:
-    print("❌ ERRO: O ficheiro não foi encontrado")
+    players_df = pd.read_csv("data/players_teams.csv")
+    coaches_df = pd.read_csv("data/cleaned/coaches_cleaned.csv")
+    print(f"Coaches data: {coaches_df.shape}")
+    print(f"Players data: {players_df.shape}")
+except FileNotFoundError as e:
+    print(" ERROR: File not found. {e}")
     exit()
 
-df.sort_values(['tmID', 'year'], inplace=True)
+# =========================================================
+# STEP 2: FEATURE ENGINEERING
+# =========================================================
+print("Engineering Features...")
 
-df['next_coachID'] = df.groupby('tmID')['coachID'].shift(-1)
+coaches_df.sort_values(['tmID', 'year'], inplace=True)
 
-df.dropna(subset=['next_coachID'], inplace=True)
+coaches_df['next_coachID'] = coaches_df.groupby('tmID')['coachID'].shift(-1)
+model_df = coaches_df.dropna(subset=['next_coachID']).copy()
+model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(int)
 
-df['coach_change'] = (df['coachID'] != df['next_coachID']).astype(int)
+model_df['prev_wins'] = model_df.groupby('tmID')['won'].shift(1)
+model_df['delta_wins'] = model_df['won'] - model_df['prev_wins']
+model_df['delta_wins'] = model_df['delta_wins'].fillna(0)
 
-print("Variável alvo 'coach_change criada")
-print("Distribuiçáo da variável alvo:")
-print(df['coach_change'].value_counts(normalize=True))
+model_df['prev_win_pct'] = model_df.groupby('tmID')['win_pct'].shift(1)
+model_df['performance_trend'] = model_df['win_pct'] - model_df['prev_win_pct']
+model_df['performance_trend'] = model_df['performance_trend'].fillna(0)
+
+print("Calculating Roster Churn...")
+p_minutes = players_df.groupby(['year', 'tmID', 'playerID'])['minutes'].sum().reset_index()
+
+churn_data = []
+teams = p_minutes['tmID'].unique()
+years = sorted(p_minutes['year'].unique())
+
+for team in teams:
+    team_data = p_minutes[p_minutes['tmID'] == team]
+    for year in years:
+        if year == 1:
+            churn_data.append({'tmID': team, 'year': year, 'roster_churn': 0})
+            continue
+        
+        curr_roster = team_data[team_data['year'] == year]
+        prev_roster = team_data[team_data['year'] == year - 1]
+
+        if prev_roster.empty or curr_roster.empty:
+            churn_data.append({'tmID': team, 'year': year, 'roster_churn': 0})
+            continue
+
+        returning_players = set(prev_roster['playerID'])
+        curr_total_minutes = curr_roster['minutes'].sum()
+
+        if curr_total_minutes == 0:
+            churn_val = 0
+        else:
+            returning_minutes = curr_roster[curr_roster['playerID'].isin(returning_players)]['minutes'].sum()
+            stability = returning_minutes / curr_total_minutes
+            churn_val = 1 - stability
+
+        churn_data.append({'tmID': team, 'year': year, 'roster_churn': churn_val})
+
+churn_df = pd.DataFrame(churn_data)
+model_df = model_df.merge(churn_df, on=['tmID', 'year'], how='left')
+model_df['roster_churn'] = model_df['roster_churn'].fillna(0)
+
+# =========================================================
+# STEP 3: PREPARE MODEL
+# =========================================================
 
 features = [
     'win_pct',
     'post_win_pct',
     'tenure_years',
     'performance_trend',
+    'delta_wins',
+    'roster_churn',
     'won',
     'lost'
 ]
 target = 'coach_change'
 
-df['performance_trend'] = df['performance_trend'].fillna(0)
-df['post_win_pct'] = df['post_win_pct'].fillna(0)
+model_df['performance_trend'] = model_df['performance_trend'].fillna(0)
+model_df['post_win_pct'] = model_df['post_win_pct'].fillna(0)
+model_df = model_df.dropna(subset=features)
 
-df.dropna(subset=features, inplace=True)
-
-X = df[features]
-y = df[target]
-
-print(f"Features selecionadas: {', '.join(features)}")
-print(f"Dimensão final do dataset para o modelo: {X.shape}")
-
-print("\n Dividindo os dados (treino e teste cronológico)...")
-
-latest_season = df['year'].max()
-train_df = df[df['year'] < latest_season]
-test_df = df[df['year'] == latest_season]
+latest_season = model_df['year'].max()
+train_df = model_df[model_df['year'] < latest_season]
+test_df = model_df[model_df['year'] == latest_season]
 
 X_train = train_df[features]
 y_train = train_df[target]
@@ -60,47 +112,74 @@ y_test = test_df[target]
 print(f"Treino: {len(X_train)} amostras (épocas até {int(latest_season-1)})")
 print(f"Teste: {len(X_test)} amostras (época {int(latest_season)})")
 
+# =========================================================
+# STEP 4: TRAINING & THRESHOLDING
+# =========================================================
 print("\n Treinando o modelo de classificação...")
 
-model = RandomForestClassifier(n_estimators=200, random_state=42, class_weight='balanced', max_depth=5)
-model.fit(X_train, y_train)
+rf = RandomForestClassifier(n_estimators=300, random_state=42, class_weight='balanced', max_depth=6)
+rf.fit(X_train, y_train)
 
 print("Modelo treinado com sucesso!")
 
 print("\n Avaliando o desempenho do modelo...")
 
-y_pred = model.predict(X_test)
-y_pred_proba = model.predict_log_proba(X_test)[:, 1]
+y_prob = rf.predict_proba(X_test)[:, 1]
 
-print("\n--- Matriz de Confusão ---")
+THRESHOLD = 0.30
+y_pred_custom = (y_prob >= THRESHOLD).astype(int)
 
-cm = confusion_matrix(y_test, y_pred)
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Não Mudou', 'Mudou'], yticklabels=['Não mudou', 'Mudou'])
-plt.ylabel('Valor Real')
-plt.xlabel('Valor previsto')
+# =========================================================
+# STEP 5: EVALUATION
+# =========================================================
+print("\n--- Confusion Matrix ---")
+plt.figure(figsize=(6,5))
+
+cm = confusion_matrix(y_test, y_pred_custom, labels=[0,1])
+
+sns.heatmap(cm, annot=True, fmt='d', cmap='Reds', xticklabels=['Safe', 'Fired'], yticklabels=['Safe', 'Fired'])
+plt.ylabel('Actual')
+plt.xlabel('Predicted')
 plt.title('Matriz de confusão')
+plt.tight_layout()
+plt.savefig("results/plots/coach_churn_confusion_matrix.png")
 plt.show()
 
-print("--- Relatório de Classificação ---")
-print(classification_report(y_test, y_pred, target_names=['Não Mudou (0)', 'Mudou (1)'], labels=[0,1], zero_division=0))
+print("--- Classification Report ---")
+print(classification_report(y_test, y_pred_custom,labels=[0,1], target_names=['Safe', 'Fired'], zero_division=0))
 
-auc_score = roc_auc_score(y_test, y_pred_proba)
-print(f"--- AUC-ROC Score ---")
-print(f"AUC-ROC: {auc_score:.4f}\n")
-
-print("\nAnálise de importância das features...")
+if len(np.unique(y_test)) > 1:
+    auc = roc_auc_score(y_test, y_prob)
+    print(f"--- AUC-ROC Score ---")
+    print(f"AUC-ROC: {auc:.4f}\n")
+else:
+    print(f"--- AUC-ROC Score: N/A (Test set contains only one class) ---")
 
 importances = pd.DataFrame({
-    'feature': X_train.columns,
-    'importance': model.feature_importances_
-}).sort_values('importance', ascending=False)
+    'Feature': features,
+    'Importance': rf.feature_importances_
+}).sort_values(by='Importance', ascending=False)
 
-print(importances)
-
-plt.figure(figsize=(12,6))
-sns.barplot(x='importance', y='feature', data=importances, palette='viridis')
+plt.figure(figsize=(10,6))
+sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis')
 plt.title('Importância das features para prever mudança de treinador')
 plt.xlabel('Importância')
 plt.ylabel('Feature')
 plt.tight_layout()
+plt.savefig("results/plots/coach_firing_factors.png")
 plt.show()
+
+# =========================================================
+# STEP 6: SAVE PREDICTIONS
+# =========================================================
+results = test_df.copy()
+results['firing_probability'] = y_prob
+results['predicted_change'] = y_pred_custom
+
+hot_seat = results[results['predicted_change'] == 1][['tmID', 'coachID', 'win_pct', 'delta_wins', 'roster_churn', 'firing_probability']]
+hot_seat = hot_seat.sort_values('firing_probability', ascending=False)
+
+print("\nCOACHES ON THE HOT SEAT (Predicted Change):")
+print(hot_seat)
+
+hot_seat.to_csv("results/predictions/season_10_coach_changes.csv", index=False)

@@ -30,29 +30,23 @@ except FileNotFoundError as e:
 print("Engineering Features...")
 
 coaches_df = coaches_df.sort_values(['tmID', 'year', 'stint'])
-coaches_df = coaches_df.drop_duplicates(subset=['tmID', 'year'], keep='last').copy()
+model_df = coaches_df.drop_duplicates(subset=['tmID', 'year'], keep='last').copy()
 
-coaches_df.sort_values(['tmID', 'year'], inplace=True)
-coaches_df['next_coachID'] = coaches_df.groupby('tmID')['coachID'].shift(-1)
+model_df.sort_values(['tmID', 'year'], inplace=True)
+model_df['next_coachID'] = model_df.groupby('tmID')['coachID'].shift(-1)
 
-model_df = coaches_df.copy()
+model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(float)
 
-model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(int)
-
-model_df['made_playoffs'] = np.where((model_df['post_wins'] + model_df['post_losses']) > 0, 1, 0)
-
-model_df['prev_wins'] = model_df.groupby('tmID')['won'].shift(1)
-model_df['delta_wins'] = model_df['won'] - model_df['prev_wins']
-model_df['delta_wins'] = model_df['delta_wins'].fillna(0)
+model_df['league_rank'] = model_df.groupby('year')['win_pct'].rank(ascending=False, method='min')
 
 model_df['prev_win_pct'] = model_df.groupby('tmID')['win_pct'].shift(1)
-model_df['performance_trend'] = model_df['win_pct'] - model_df['prev_win_pct']
-model_df['performance_trend'] = model_df['performance_trend'].fillna(0)
+model_df['win_pct_delta'] = model_df['win_pct'] - model_df['prev_win_pct']
+model_df['win_pct_delta'] = model_df['win_pct_delta'].fillna(0)
 
 print("Calculating Roster Churn...")
 p_minutes = players_df.groupby(['year', 'tmID', 'playerID'])['minutes'].sum().reset_index()
 
-churn_data = []
+churn_map = {}
 teams = p_minutes['tmID'].unique()
 years = sorted(p_minutes['year'].unique())
 
@@ -60,31 +54,29 @@ for team in teams:
     team_data = p_minutes[p_minutes['tmID'] == team]
     for year in years:
         if year == 1:
-            churn_data.append({'tmID': team, 'year': year, 'roster_churn': 0})
+            churn_map[(team, year)] = 0
             continue
         
         curr_roster = team_data[team_data['year'] == year]
         prev_roster = team_data[team_data['year'] == year - 1]
 
         if prev_roster.empty or curr_roster.empty:
-            churn_data.append({'tmID': team, 'year': year, 'roster_churn': 0})
+            churn_map[(team, year)] = 0.5
             continue
 
-        returning_players = set(prev_roster['playerID'])
+        prev_players = set(prev_roster['playerID'])
         curr_total_minutes = curr_roster['minutes'].sum()
 
         if curr_total_minutes == 0:
             churn_val = 0
         else:
-            returning_minutes = curr_roster[curr_roster['playerID'].isin(returning_players)]['minutes'].sum()
+            returning_minutes = curr_roster[curr_roster['playerID'].isin(prev_players)]['minutes'].sum()
             stability = returning_minutes / curr_total_minutes
             churn_val = 1 - stability
 
-        churn_data.append({'tmID': team, 'year': year, 'roster_churn': churn_val})
+        churn_map[(team, year)] = churn_val
 
-churn_df = pd.DataFrame(churn_data)
-model_df = model_df.merge(churn_df, on=['tmID', 'year'], how='left')
-model_df['roster_churn'] = model_df['roster_churn'].fillna(0)
+model_df['roster_churn'] = model_df.apply(lambda x: churn_map.get((x['tmID'], x['year']), 0), axis=1)
 
 # =========================================================
 # STEP 3: PREPARE MODEL
@@ -92,39 +84,39 @@ model_df['roster_churn'] = model_df['roster_churn'].fillna(0)
 
 features = [
     'win_pct',
-    'made_playoffs',
+    'league_rank',
+    'win_pct_delta',
     'tenure_years',
-    'performance_trend',
-    'delta_wins',
     'roster_churn',
     'won',
     'lost'
 ]
 target = 'coach_change'
 
-model_df = model_df.dropna(subset=features)
-
 latest_season = model_df['year'].max()
 
 train_df = model_df[model_df['year'] < latest_season].copy()
+train_df = train_df.dropna(subset=[target])
+
 test_df = model_df[model_df['year'] == latest_season].copy()
 
-train_df = train_df.dropna(subset=['next_coachID'])
+train_df[features] = train_df[features].fillna(0)
+test_df[features] = test_df[features].fillna(0)
 
 X_train = train_df[features]
 y_train = train_df[target]
 X_test = test_df[features]
-y_test = test_df[target]
+y_test = test_df[target] if not test_df[target].isna().all() else None
 
-print(f"Treino: {len(X_train)} amostras (épocas até {int(latest_season-1)})")
-print(f"Teste: {len(X_test)} amostras (época {int(latest_season)})")
+print(f"Training Data: {X_train.shape[0]} samples")
+print(f"Test Data: {X_test.shape[0]} samples (Year {int(latest_season)})")
 
 # =========================================================
 # STEP 4: TRAINING 
 # =========================================================
 print("\n Training Random Forest Classifier...")
 
-rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=8)
+rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=6, min_samples_leaf=4)
 rf.fit(X_train, y_train)
 
 print("Model trained successfully!")
@@ -133,7 +125,7 @@ print("\n Evaluating model performance...")
 
 y_prob = rf.predict_proba(X_test)[:, 1]
 
-THRESHOLD = 0.40
+THRESHOLD = 0.45
 y_pred_custom = (y_prob >= THRESHOLD).astype(int)
 
 # =========================================================
@@ -183,7 +175,7 @@ results = test_df.copy()
 results['firing_probability'] = y_prob
 results['predicted_change'] = y_pred_custom
 
-hot_seat = results[results['predicted_change'] == 1][['tmID', 'coachID', 'win_pct', 'delta_wins', 'roster_churn', 'firing_probability']]
+hot_seat = results[results['predicted_change'] == 1][['tmID', 'coachID', 'win_pct', 'league_rank', 'win_pct_delta', 'firing_probability']]
 hot_seat = hot_seat.sort_values('firing_probability', ascending=False)
 
 print("\nCOACHES ON THE HOT SEAT (Predicted Change):")

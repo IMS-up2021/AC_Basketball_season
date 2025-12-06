@@ -159,7 +159,7 @@ def integrate_data(datasets, config):
     datasets['coaches'][['coachID','tmID','year','win_pct','post_win_pct','tenure_years','is_new_coach']], on=['tmID', 'year'], how='left')
 
     print("Integrating team metadata...")
-    full_dataset = full_dataset.merge(datasets['teams'][['tmID', 'lgID', 'franchID', 'name']], on='tmID', how='left')
+    full_dataset = full_dataset.merge(datasets['teams'][['tmID', 'lgID', 'confID', 'franchID', 'name']], on='tmID', how='left')
 
     print("Integrating awards data...")
     award_counts = datasets['awards_players'].groupby(['playerID', 'year']).size().reset_index(name = 'award_count')

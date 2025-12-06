@@ -28,12 +28,15 @@ df = pd.read_csv(data_path)
 print(f"Loaded dataset with shape: {df.shape}")
 
 # Ensure we handle the conference column name correctly
-if 'lgID_x' in df.columns:
-    df.rename(columns={'lgID_x': 'conference'}, inplace=True)
-elif 'lgID_y' in df.columns:
-    df.rename(columns={'lgID_y': 'conference'}, inplace=True)
-elif 'lgID' in df.columns:
-    df.rename(columns={'lgID': 'conference'}, inplace=True)
+if 'confID' not in df.columns:
+    if 'lgID_x' in df.columns:
+        df.rename(columns={'lgID_x': 'conference'}, inplace=True)
+    elif 'lgID' in df.columns:
+        df.rename(columns={'lgID': 'conference'}, inplace=True)
+else:
+    df.rename(columns={'confID': 'conference'}, inplace=True)
+
+df['conference'] = df['conference'].fillna('Unknown')
 
 # =========================================================
 # STEP 3.2: PLAYER-LEVEL ROSTER COMPOSITION
@@ -84,13 +87,12 @@ if 'efficiency' not in df.columns:
 # Note: 'rolling_win_pct' is likely same for all players on team, so we take max or mean
 team_df = df.groupby(['year', 'tmID', 'conference'], as_index=False).agg({
     'points': 'sum',
-    'rebounds': 'sum',
-    'assists': 'sum',
-    'steals': 'sum',
-    'blocks': 'sum',
-    'turnovers': 'sum',
     'fgMade': 'sum',
     'fgAttempted': 'sum',
+    'steals': 'sum',
+    'blocks': 'sum',
+    'assists': 'sum',
+    'turnovers': 'sum',
     'win_pct': 'max',
 })
 
@@ -140,7 +142,12 @@ print(f"Training Ranking Model with {len(features)} features...")
 rf = RandomForestRegressor(n_estimators=500, max_depth=8, random_state=42)
 rf.fit(train_df[features], train_df[target])
 
-test_df['predicted_win_pct'] = rf.predict(test_df[features])
+test_df['raw_pred_win_pct'] = rf.predict(test_df[features])
+
+for conf in test_df['conference'].unique():
+    conf_mask = test_df['conference'] == conf
+    conf_mean = test_df.loc[conf_mask, 'raw_pred_win_pct'].mean()
+    test_df.loc[conf_mask, 'predicted_win_pct'] = (test_df.loc[conf_mask, 'raw_pred_win_pct'] - conf_mean + 0.5).clip(0,1)
 
 # Metrics
 mae = mean_absolute_error(test_df['win_pct'], test_df['predicted_win_pct'])

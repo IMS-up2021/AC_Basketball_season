@@ -18,8 +18,9 @@ print("Loading data...")
 try:
     players_df = pd.read_csv("data/players_teams.csv")
     coaches_df = pd.read_csv("data/cleaned/coaches_cleaned.csv")
+    teams_df = pd.read_csv("data/teams.csv")
     print(f"Coaches data: {coaches_df.shape}")
-    print(f"Players data: {players_df.shape}")
+    print(f"Teams data: {teams_df.shape}")
 except FileNotFoundError as e:
     print(" ERROR: File not found. {e}")
     exit()
@@ -33,15 +34,21 @@ coaches_df = coaches_df.sort_values(['tmID', 'year', 'stint'])
 model_df = coaches_df.drop_duplicates(subset=['tmID', 'year'], keep='last').copy()
 
 model_df.sort_values(['tmID', 'year'], inplace=True)
+
 model_df['next_coachID'] = model_df.groupby('tmID')['coachID'].shift(-1)
+model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(int)
 
-model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(float)
+print("Calculating Performance vs Expectation...")
+teams_df['pythag_pct'] = (teams_df['o_pts']**13.91) / (teams_df['o_pts']**13.91 + teams_df['d_pts']**13.91)
+teams_features = teams_df[['year', 'tmID', 'pythag_pct', 'GP']].copy()
 
-model_df['league_rank'] = model_df.groupby('year')['win_pct'].rank(ascending=False, method='min')
+model_df = model_df.merge(teams_features, on=['year', 'tmID'], how='left')
 
-model_df['prev_win_pct'] = model_df.groupby('tmID')['win_pct'].shift(1)
-model_df['win_pct_delta'] = model_df['win_pct'] - model_df['prev_win_pct']
-model_df['win_pct_delta'] = model_df['win_pct_delta'].fillna(0)
+model_df['expected_wins'] = model_df['pythag_pct'] * (model_df['won'] + model_df['lost'])
+model_df['underperformance'] = model_df['won'] - model_df['expected_wins']
+
+print("Calculating Championship Hangover...")
+model_df['recent_post_success'] = model_df.groupby('tmID')['post_wins'].transform(lambda x: x.rolling(window=3, min_periods=1).sum())
 
 print("Calculating Roster Churn...")
 p_minutes = players_df.groupby(['year', 'tmID', 'playerID'])['minutes'].sum().reset_index()
@@ -78,20 +85,27 @@ for team in teams:
 
 model_df['roster_churn'] = model_df.apply(lambda x: churn_map.get((x['tmID'], x['year']), 0), axis=1)
 
+print("Calculating Lifetime Wins...")
+full_coach_history = coaches_df.groupby(['coachID', 'year'])['won'].sum().reset_index()
+full_coach_history = full_coach_history.sort_values(['coachID', 'year'])
+full_coach_history['lifetime_wins'] = full_coach_history.groupby('coachID')['won'].transform(lambda x: x.cumsum().shift(1)).fillna(0)
+
+model_df = model_df.merge(full_coach_history[['coachID', 'year', 'lifetime_wins']], on=['coachID', 'year'], how='left')
 # =========================================================
 # STEP 3: PREPARE MODEL
 # =========================================================
 
 features = [
     'win_pct',
-    'league_rank',
-    'win_pct_delta',
+    'underperformance',
+    'recent_post_success',
     'tenure_years',
     'roster_churn',
-    'won',
-    'lost'
+    'lifetime_wins'
 ]
 target = 'coach_change'
+
+model_df = model_df.fillna(0)
 
 latest_season = model_df['year'].max()
 
@@ -100,13 +114,10 @@ train_df = train_df.dropna(subset=[target])
 
 test_df = model_df[model_df['year'] == latest_season].copy()
 
-train_df[features] = train_df[features].fillna(0)
-test_df[features] = test_df[features].fillna(0)
-
 X_train = train_df[features]
 y_train = train_df[target]
 X_test = test_df[features]
-y_test = test_df[target] if not test_df[target].isna().all() else None
+y_test = test_df[target]
 
 print(f"Training Data: {X_train.shape[0]} samples")
 print(f"Test Data: {X_test.shape[0]} samples (Year {int(latest_season)})")
@@ -116,21 +127,19 @@ print(f"Test Data: {X_test.shape[0]} samples (Year {int(latest_season)})")
 # =========================================================
 print("\n Training Random Forest Classifier...")
 
-rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=6, min_samples_leaf=4)
+rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=5, min_samples_leaf=3)
 rf.fit(X_train, y_train)
 
 print("Model trained successfully!")
 
-print("\n Evaluating model performance...")
-
-y_prob = rf.predict_proba(X_test)[:, 1]
-
-THRESHOLD = 0.45
-y_pred_custom = (y_prob >= THRESHOLD).astype(int)
-
 # =========================================================
 # STEP 5: EVALUATION
 # =========================================================
+y_prob = rf.predict_proba(X_test)[:, 1]
+
+THRESHOLD = 0.50
+y_pred_custom = (y_prob >= THRESHOLD).astype(int)
+
 print("\n--- Confusion Matrix ---")
 plt.figure(figsize=(6,5))
 
@@ -161,24 +170,22 @@ importances = pd.DataFrame({
 
 plt.figure(figsize=(10,6))
 sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis')
-plt.title('Feature Importance: Coach Changes')
+plt.title('Why Do Coaches Get Fired? (Feature Importance)')
 plt.xlabel('Importance')
 plt.ylabel('Feature')
 plt.tight_layout()
 plt.savefig("results/plots/coach_firing_factors.png")
-plt.show()
 
 # =========================================================
 # STEP 6: SAVE PREDICTIONS
 # =========================================================
-results = test_df.copy()
+results = test_df[['tmID', 'coachID', 'year', 'win_pct', 'underperformance', 'recent_post_success']].copy()
 results['firing_probability'] = y_prob
 results['predicted_change'] = y_pred_custom
 
-hot_seat = results[results['predicted_change'] == 1][['tmID', 'coachID', 'win_pct', 'league_rank', 'win_pct_delta', 'firing_probability']]
-hot_seat = hot_seat.sort_values('firing_probability', ascending=False)
+hot_seat = results.sort_values('firing_probability', ascending=False)
 
 print("\nCOACHES ON THE HOT SEAT (Predicted Change):")
-print(hot_seat)
+print(hot_seat[['tmID', 'coachID', 'win_pct', 'underperformance', 'firing_probability']].head(10))
 
 hot_seat.to_csv("results/predictions/season_10_coach_changes.csv", index=False)

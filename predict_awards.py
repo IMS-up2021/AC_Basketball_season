@@ -3,15 +3,15 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from xgboost import XGBRanker
 
 # Set visual style
 sns.set_style("whitegrid")
 plt.rcParams['figure.figsize'] = (14,10)
 
 print("="*80)
-print("PHASE 5: INDIVIDUAL AWARDS PREDICTION (TEST SEASON)")
+print("PHASE 5: INDIVIDUAL AWARDS PREDICTION (XGBoost Learning-to-Rank)")
 print("="*80)
 
 # =========================================================
@@ -43,10 +43,8 @@ print("Calculating Team Context (Ranks)...")
 
 if 'lgID' in df.columns:
     df.rename(columns={'lgID': 'conference'}, inplace=True)
-elif 'lgID_x' in df.columns:
-    df.rename(columns={'lgID': 'conference'}, inplace=True)
-elif 'lgID_y' in df.columns:
-    df.rename(columns={'lgID': 'conference'}, inplace=True)
+elif 'confID' in df.columns:
+    df.rename(columns={'confID': 'conference'}, inplace=True)
 
 if 'conference' not in df.columns:
     df['conference'] = 'League'
@@ -56,13 +54,14 @@ team_stats['conf_rank'] = team_stats.groupby(['year', 'conference'])['win_pct'].
 
 df = df.merge(team_stats[['year', 'tmID', 'conf_rank']], on=['year', 'tmID'], how='left')
 
-# =========================================================
-# 3. DATA AGGREGATION & ADVANCED METRICS
-# =========================================================
-metric_cols = ['GP', 'minutes', 'points', 'rebounds', 'assists', 'steals', 'blocks', 'turnovers', 'PF', 'fgMade', 'fgAttempted', 'ftMade', 'ftAttempted']
+metric_cols = ['GP', 'minutes', 'points', 'rebounds', 'dRebounds', 'assists', 'steals', 'blocks', 'turnovers', 'PF', 'fgMade', 'fgAttempted', 'ftMade', 'ftAttempted']
+
+if 'dRebounds' not in df.columns:
+    df['dRebounds'] = df['rebounds'] * 0.75
 
 player_stats = df.groupby(['playerID', 'year'], as_index=False).agg({
     **{col: 'sum' for col in metric_cols},
+    'tmID': 'first',
     'win_pct': 'mean',
     'conf_rank': 'mean',
     'experience_years': 'max',
@@ -76,16 +75,26 @@ player_stats['efficiency'] = (
     player_stats['points'] + player_stats['rebounds'] + player_stats['assists'] + player_stats['steals'] + player_stats['blocks'] - player_stats['turnovers'] - (player_stats['fgAttempted'] - player_stats['fgMade']) - (player_stats['ftAttempted'] - player_stats['ftMade'])
 )
 
-player_stats['def_score'] = player_stats['steals'] * 2 + player_stats['blocks'] * 2 + player_stats['rebounds']
+player_stats['def_score'] = (player_stats['steals'] * 3.5) + (player_stats['blocks'] * 2.5) + (player_stats['dRebounds'] * 0.8)
 
-for col in ['points', 'rebounds', 'assists', 'steals', 'blocks', 'efficiency']:
-    player_stats[f'{col}_pg'] = player_stats[col] / player_stats['GP'].replace(0,1)
+player_stats['points_per_minute'] = player_stats['points'] / player_stats['minutes'].replace(0,1)
+
+for col in ['points', 'rebounds', 'dRebounds', 'assists', 'steals', 'blocks', 'efficiency']:
+    if col in player_stats.columns:
+        player_stats[f'{col}_pg'] = player_stats[col] / player_stats['GP'].replace(0,1)
 
 player_stats['starter_ratio'] = player_stats['GS'] / player_stats['GP'].replace(0,1)
 
-z_cols = ['points_pg', 'efficiency_pg', 'rebounds_pg', 'assists_pg', 'steals_pg', 'blocks_pg', 'def_score']
-print("Calculating Z-Scores...(Relative to League Average)")
+print("Creating 'Best Player on Best Team feature...")
 
+team_max_eff = player_stats.groupby(['year', 'tmID'])['efficiency_pg'].max().reset_index()
+team_max_eff.rename(columns={'efficiency_pg': 'team_max_eff'}, inplace=True)
+
+player_stats = player_stats.merge(team_max_eff, on=['year', 'tmID'], how='left')
+
+player_stats['is_best_player_on_top_seed'] = ((player_stats['conf_rank'] <= 2) & (player_stats['efficiency_pg'] == player_stats['team_max_eff'])).astype(int)
+
+z_cols = ['points_pg', 'efficiency_pg', 'rebounds_pg', 'assists_pg', 'steals_pg', 'blocks_pg', 'def_score', 'points_per_minute']
 for col in z_cols:
     player_stats[f'z_{col}'] = player_stats.groupby('year')[col].transform(lambda x: (x - x.mean()) / x.std()).fillna(0)
 
@@ -94,7 +103,7 @@ player_stats['prev_efficiency_pg'] = player_stats.groupby('playerID')['efficienc
 player_stats['efficiency_delta'] = player_stats['efficiency_pg'] - player_stats['prev_efficiency_pg']
 
 # =========================================================
-# 4. TARGET MAPPING & NARRATIVE FEATURES
+# 4. TARGET MAPPING & VOTER FATIGUE
 # =========================================================
 target_awards = [
     'Most Valuable Player',
@@ -111,95 +120,109 @@ for award in target_awards:
     winners['is_winner'] = 1
 
     col_name = f"target_{award.replace(' ', '_')}"
+
     player_stats = player_stats.merge(winners, on=['playerID', 'year'], how='left')
     player_stats.rename(columns={'is_winner': col_name}, inplace=True)
     player_stats[col_name] = player_stats[col_name].fillna(0)
 
-    prev_col_name = f"prev_winner_{award.replace(' ', '_')}"
-    player_stats[prev_col_name] = player_stats.groupby('playerID')[col_name].shift(1).fillna(0)
+    fatigue_col = f"career_{award.replace(' ', '_')}_wins"
+
+    player_stats[fatigue_col] = player_stats.groupby('playerID')[col_name].cumsum().shift(1).fillna(0)
 
 # =========================================================
-# 5. MODEL TRAINING
+# 5. RANKING MODEL (XGBRanker)
 # =========================================================
 TEST_YEAR = 10
-train_data = player_stats[player_stats['year'] < TEST_YEAR].fillna(0)
-test_data = player_stats[player_stats['year'] == TEST_YEAR].fillna(0)
-
-print(f"\n Training Data: {train_data['year'].nunique()} seasons ({len(train_data)} rows)")
-print(f"Test Data: Season {TEST_YEAR} ({len(test_data)} rows)")
-
 prediction_summary = []
 race_data = {}
 
-def predict_award(award_name, features, filter_func=None):
+def softmax(x):
+    e_x = np.exp(x - np.max(x))
+    return e_x / e_x.sum()
+
+def train_predict_award(award_name, features, filter_func=None):
     target_col = f"target_{award_name.replace(' ', '_')}"
 
+    data = player_stats.copy()
     if filter_func:
-        train_set = train_data[filter_func(train_data)].copy()
-        test_set = test_data[filter_func(test_data)].copy()
-    else:
-        train_set = train_data.copy()
-        test_set = test_data.copy()
+        data = data[filter_func(data)].copy()
     
-    if train_set[target_col].sum() == 0:
+    train_df = data[data['year'] < TEST_YEAR].sort_values(by='year')
+    test_df = data[data['year'] == TEST_YEAR].copy()
+    
+    if train_df[target_col].sum() == 0:
         return None
 
-    X_train = train_set[features]
-    y_train = train_set[target_col]
-    X_test = test_set[features]
+    X_train = train_df[features]
+    y_train = train_df[target_col]
 
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    groups = train_df.groupby('year').size().to_list()
 
-    clf = RandomForestClassifier(n_estimators=300, random_state=42, class_weight='balanced')    
-    clf.fit(X_train_scaled, y_train)
+    ranker = XGBRanker(
+        objective='rank:pairwise',
+        n_estimators=100,
+        learning_rate=0.05,
+        max_depth=3,
+        subsample=0.8,
+        random_state=42
+    )
 
-    if len(clf.classes_) > 1:
-        probs = clf.predict_proba(X_test_scaled)[:, 1]
+    ranker.fit(X_train, y_train, group=groups, verbose=False)
+
+    if len(test_df) == 0:
+        print(f"No candidates for {award_name} in Test Year.")
+        return None
+    
+    test_scores = ranker.predict(test_df[features])
+    test_df['pred_score'] = test_scores
+
+    test_df['probability'] = softmax(test_df['pred_score'].values)
+
+    top_candidates = test_df.sort_values('pred_score', ascending=False).head(5)
+
+    min_score = top_candidates['pred_score'].min()
+    max_score = top_candidates['pred_score'].max()
+    if max_score != min_score:
+        top_candidates['probability'] = (top_candidates['pred_score'] - min_score) / (max_score - min_score)
     else:
-        probs = np.zeros(len(X_test))
-
-    test_set['probability'] = probs
-
-    top_candidates = test_set.sort_values('probability', ascending=False).head(5)
-    race_data[award_name] = top_candidates[['playerID', 'probability', 'conf_rank',] if 'conf_rank' in features else ['playerID', 'probability']]
+        top_candidates['probability'] = 1.0
 
     winner_row = top_candidates.iloc[0]
-    actual_row = test_set[test_set[target_col] == 1]
-    actual_winner = actual_row.iloc[0]['playerID'] if not actual_row.empty else "None"
+
+    actual_row = test_df[test_df[target_col] == 1]
+    actual_winner = actual_row.iloc[0]['playerID'] if not actual_row.empty else "Unknown"
 
     prediction_summary.append({
         'Award': award_name,
         'Predicted Winner': winner_row['playerID'],
-        'Prob': f"{winner_row['probability']:.2f}",
+        'Prob': f"{winner_row['probability']:.4f}",
         'Actual Winner': actual_winner,
         'Correct': "YES" if winner_row['playerID'] == actual_winner else "NO"
     })
 
     race_data[award_name] = top_candidates[['playerID', 'probability']]
 
-    print(f"Computed: {award_name}")
+    print(f"Computed: {award_name} -> Predicted: {winner_row['playerID']}")
 
-    return clf
+    return ranker
 
 # =========================================================
 # 6. EXECUTE PREDICTIONS
 # =========================================================
-mvp_features = ['z_points_pg', 'z_efficiency_pg', 'ts_pct', 'conf_rank', 'win_pct', 'prev_winner_Most_Valuable_Player']
-mvp_model = predict_award('Most Valuable Player', mvp_features)
+mvp_features = ['z_points_pg', 'z_efficiency_pg', 'win_pct', 'conf_rank', 'is_best_player_on_top_seed', 'career_Most_Valuable_Player_wins', 'ts_pct']
+mvp_model = train_predict_award('Most Valuable Player', mvp_features)
 
-roy_features = ['z_points_pg', 'z_rebounds_pg', 'z_efficiency_pg', 'minutes', 'GP']
-predict_award('Rookie of the Year', roy_features, lambda x: x['experience_years'] == 0)
+roy_features = ['z_points_pg', 'z_rebounds_pg', 'minutes', 'GP']
+train_predict_award('Rookie of the Year', roy_features, lambda x: x['experience_years'] == 0)
 
-dpoy_features = ['z_steals_pg', 'z_blocks_pg', 'z_rebounds_pg', 'z_def_score']
-predict_award('Defensive Player of the Year', dpoy_features)
+dpoy_features = ['z_steals_pg', 'z_blocks_pg', 'dRebounds_pg', 'z_def_score', 'win_pct']
+train_predict_award('Defensive Player of the Year', dpoy_features)
 
-six_features = ['z_points_pg', 'z_efficiency_pg', 'ts_pct', 'minutes']
-predict_award('Sixth Woman of the Year', six_features, lambda x: x['starter_ratio'] < 0.5)
+six_features = ['z_points_pg', 'z_efficiency_pg', 'ts_pct', 'z_points_per_minute']
+train_predict_award('Sixth Woman of the Year', six_features, lambda x: x['starter_ratio'] < 0.5)
 
-mip_features = ['efficiency_delta', 'z_points_pg', 'minutes']
-predict_award('Most Improved Player', mip_features, lambda x: x['experience_years'] > 0)
+mip_features = ['efficiency_delta', 'z_points_pg', 'minutes', 'GP']
+train_predict_award('Most Improved Player', mip_features, lambda x: x['experience_years'] > 0)
 
 # =========================================================
 # 7. SAVE RESULTS
@@ -226,19 +249,20 @@ if mvp_model:
     plt.savefig(f"{plot_dir}/mvp_factors.png")
 
 num_awards = len(race_data)
-fig, axes = plt.subplots(2,3, figsize=(18,10))
-axes = axes.flatten()
+if num_awards > 0:
+    fig, axes = plt.subplots(2,3, figsize=(18,10))
+    axes = axes.flatten()
 
-for i, (award, data) in enumerate(race_data.items()):
-    ax = axes[i]
-    sns.barplot(x='probability', y='playerID', data=data, ax=ax, palette='viridis', hue='playerID', legend=False)
-    ax.set_title(award, fontsize=14, fontweight='bold')
-    ax.set_xlabel("Predicted Probability")
-    ax.set_ylabel("")
-    ax.set_xlim(0,1)
+    for i, (award, data) in enumerate(race_data.items()):
+        ax = axes[i]
+        sns.barplot(x='probability', y='playerID', data=data, ax=ax, palette='viridis', hue='playerID', legend=False)
+        ax.set_title(award, fontsize=12, fontweight='bold')
+        ax.set_xlabel("Predicted Probability")
+        ax.set_ylabel("")
+        ax.set_xlim(0,1.1)
 
-for j in range(i+1, len(axes)):
-    fig.delaxes(axes[j])
+    for j in range(i+1, len(axes)):
+        fig.delaxes(axes[j])
 
 plt.tight_layout()
 viz_path = f"{plot_dir}/award_races_Season_11.png"

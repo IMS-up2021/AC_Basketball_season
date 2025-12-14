@@ -50,21 +50,22 @@ print("Calculating Pythagorean Expectation...")
 
 teams_df_raw['pythag_win_pct'] = (teams_df_raw['o_pts']**13.91) / (teams_df_raw['o_pts']**13.91 + teams_df_raw['d_pts']**13.91)
 
+teams_df_raw['point_diff_pg'] = (teams_df_raw['o_pts'] - teams_df_raw['d_pts']) / teams_df_raw['GP']
+
 teams_df_raw['next_year'] = teams_df_raw['year'] + 1
-pythag_features = teams_df_raw[['tmID', 'next_year', 'pythag_win_pct']].rename(columns={'next_year': 'year', 'pythag_win_pct': 'prev_pythag_expectation'})
+pythag_features = teams_df_raw[['tmID', 'next_year', 'pythag_win_pct', 'point_diff_pg']].rename(columns={'next_year': 'year', 'pythag_win_pct': 'prev_pythag_expectation', 'point_diff_pg': 'prev_point_diff'})
 
 # =========================================================
 # STEP 3.3: WEIGHTED ROSTER CONTINUITY
 # =========================================================
 print("Calculating Weighted Roster Continuity (Efficiency Returning)...")
 
-player_stats_cols = ['playerID', 'year', 'minutes', 'points', 'win_pct', 'efficiency']
+player_stats_cols = ['playerID', 'year', 'tmID', 'minutes', 'points', 'win_pct', 'efficiency']
 if 'efficiency' not in df.columns:
     df['efficiency'] = df['points'] + df['rebounds'] + df['assists'] + df['steals'] + df['blocks'] - df['turnovers']
 
 team_total_eff = df.groupby(['tmID', 'year'])['efficiency'].sum().reset_index(name='team_total_efficiency')
 
-player_stats_cols = ['playerID', 'year', 'minutes', 'points', 'win_pct', 'efficiency']
 player_history = df[player_stats_cols].copy()
 player_history['next_year'] = player_history['year'] + 1
 player_history = player_history.rename(columns={
@@ -72,7 +73,8 @@ player_history = player_history.rename(columns={
     'points': 'prev_pts',
     'win_pct': 'prev_player_win_pct',
     'efficiency': 'prev_player_eff',
-    'year': 'prev_year'
+    'year': 'prev_year',
+    'tmID': 'prev_tmID'
 })
 
 df_roster = df[['year', 'tmID', 'playerID']].merge(
@@ -82,15 +84,18 @@ df_roster = df[['year', 'tmID', 'playerID']].merge(
     how='left'
 )
 
+df_roster = df_roster[df_roster['tmID'] == df_roster['prev_tmID']]
+
 roster_continuity_agg = df_roster.groupby(['year', 'tmID'])['prev_player_eff'].sum().reset_index(name='returning_efficiency_total')
 
 team_total_eff['next_year'] = team_total_eff['year'] + 1
 prev_team_totals = team_total_eff[['tmID', 'next_year', 'team_total_efficiency']].rename(columns={'next_year': 'year', 'team_total_efficiency': 'prev_year_team_total_eff'})
 
 roster_features = roster_continuity_agg.merge(prev_team_totals, on=['year', 'tmID'], how='left')
+
 roster_features['weighted_continuity'] = roster_features['returning_efficiency_total'] / roster_features['prev_year_team_total_eff']
 
-roster_features['weighted_continuity'] = roster_features['weighted_continuity'].fillna(0).clip(0, 1.5)
+roster_features['weighted_continuity'] = roster_features['weighted_continuity'].fillna(0).clip(0, 1.1)
 
 print("Weighted continuity calculated")
 
@@ -119,7 +124,7 @@ conf_strength.rename(columns={'win_pct': 'prev_conf_strength'}, inplace=True)
 team_df = team_df.merge(conf_strength, on=['year', 'conference'], how='left')
 team_df['prev_conf_strength'] = team_df['prev_conf_strength'].fillna(0.5)
 
-lag_cols = ['points','shooting_efficiency', 'def_impact', 'win_pct']
+lag_cols = ['shooting_efficiency', 'def_impact', 'win_pct']
 for col in lag_cols:
     team_df[f'team_lag_{col}'] = team_df.groupby('tmID')[col].shift(1)
 
@@ -129,14 +134,14 @@ model_df = model_df.merge(roster_features[['year', 'tmID', 'weighted_continuity'
 model_df = model_df.dropna(subset=[f'team_lag_{col}' for col in lag_cols])
 
 model_df['prev_pythag_expectation'] = model_df['prev_pythag_expectation'].fillna(model_df['team_lag_win_pct'])
-model_df['weighted_continuity'] = model_df['weighted_continuity'].fillna(0.5)
+model_df['weighted_continuity'] = model_df['weighted_continuity'].fillna(0.6)
 
 # =========================================================
 # STEP 3.5: MODEL TRAINING (XGBOOST)
 # =========================================================
 features = [
     'prev_pythag_expectation',
-    'team_lag_points',
+    'prev_point_diff',
     'team_lag_def_impact',
     'team_lag_shooting_efficiency',
     'weighted_continuity',

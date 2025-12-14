@@ -36,7 +36,12 @@ model_df = coaches_df.drop_duplicates(subset=['tmID', 'year'], keep='last').copy
 model_df.sort_values(['tmID', 'year'], inplace=True)
 
 model_df['next_coachID'] = model_df.groupby('tmID')['coachID'].shift(-1)
-model_df['coach_change'] = (model_df['coachID'] != model_df['next_coachID']).astype(int)
+
+model_df['coach_change'] = np.where(
+    model_df['next_coachID'].isna(),
+    np.nan,
+    (model_df['coachID'] != model_df['next_coachID']).astype(float)
+)
 
 print("Calculating Performance vs Expectation...")
 teams_df['pythag_pct'] = (teams_df['o_pts']**13.91) / (teams_df['o_pts']**13.91 + teams_df['d_pts']**13.91)
@@ -92,7 +97,7 @@ full_coach_history['lifetime_wins'] = full_coach_history.groupby('coachID')['won
 
 model_df = model_df.merge(full_coach_history[['coachID', 'year', 'lifetime_wins']], on=['coachID', 'year'], how='left')
 # =========================================================
-# STEP 3: PREPARE MODEL
+# STEP 3: PREPARE SPLITS
 # =========================================================
 
 features = [
@@ -107,69 +112,66 @@ target = 'coach_change'
 
 model_df = model_df.fillna(0)
 
-latest_season = model_df['year'].max()
+eval_train = model_df[model_df['year'] < 9].copy().dropna(subset=[target])
+eval_test = model_df[model_df['year'] == 9].copy().dropna(subset=[target])
 
-train_df = model_df[model_df['year'] < latest_season].copy()
-train_df = train_df.dropna(subset=[target])
+final_train = model_df[model_df['year'] < 10].copy().dropna(subset=[target])
+final_predict = model_df[model_df['year'] == 10].copy()
 
-test_df = model_df[model_df['year'] == latest_season].copy()
-
-X_train = train_df[features]
-y_train = train_df[target]
-X_test = test_df[features]
-y_test = test_df[target]
-
-print(f"Training Data: {X_train.shape[0]} samples")
-print(f"Test Data: {X_test.shape[0]} samples (Year {int(latest_season)})")
+print(f"Evaluation Train (Year 1-8): {eval_train.shape[0]} samples")
+print(f"Evaluation Test (Year 9): {eval_test.shape[0]} samples")
+print(f"Final Train (Year 1-9): {final_train.shape[0]} samples")
+print(f"Final Prediction (Year 10): {final_predict.shape[0]} samples")
 
 # =========================================================
-# STEP 4: TRAINING 
+# STEP 4: VALIDATION PHASE (YEAR 9)
 # =========================================================
-print("\n Training Random Forest Classifier...")
+print("\n--- PHASE 1: VALIDATION ---")
 
-rf = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=5, min_samples_leaf=3)
-rf.fit(X_train, y_train)
+rf_val = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=5, min_samples_leaf=3)
+rf_val.fit(eval_train[features], eval_train[target])
 
-print("Model trained successfully!")
-
-# =========================================================
-# STEP 5: EVALUATION
-# =========================================================
-y_prob = rf.predict_proba(X_test)[:, 1]
-
+y_eval_prob = rf_val.predict_proba(eval_test[features])[:, 1]
 THRESHOLD = 0.50
-y_pred_custom = (y_prob >= THRESHOLD).astype(int)
+y_eval_pred = (y_eval_prob >= THRESHOLD).astype(int)
 
 print("\n--- Confusion Matrix ---")
 plt.figure(figsize=(6,5))
-
-cm = confusion_matrix(y_test, y_pred_custom, labels=[0,1])
-
+cm = confusion_matrix(eval_test[target], y_eval_pred, labels=[0,1])
 sns.heatmap(cm, annot=True, fmt='d', cmap='Reds', xticklabels=['Safe', 'Fired'], yticklabels=['Safe', 'Fired'])
-plt.ylabel('Actual')
-plt.xlabel('Predicted')
-plt.title(f'Confusion Matrix (Threshold {THRESHOLD})')
+plt.ylabel('Actual (Year 9)')
+plt.xlabel('Predicted (Year 9)')
+plt.title(f'Confusion Matrix (Validation)')
 plt.tight_layout()
 plt.savefig("results/plots/coach_churn_confusion_matrix.png")
-plt.show()
 
-print("--- Classification Report ---")
-print(classification_report(y_test, y_pred_custom,labels=[0,1], target_names=['Safe', 'Fired'], zero_division=0))
+print("--- Classification Report (Validation) ---")
+print(classification_report(eval_test[target], y_eval_pred,labels=[0,1], target_names=['Safe', 'Fired'], zero_division=0))
 
-if len(np.unique(y_test)) > 1:
-    auc = roc_auc_score(y_test, y_prob)
-    print(f"--- AUC-ROC Score ---")
+if len(np.unique(eval_test[target])) > 1:
+    auc = roc_auc_score(eval_test[target], y_eval_prob)
     print(f"AUC-ROC: {auc:.4f}\n")
 else:
     print(f"--- AUC-ROC Score: N/A (Test set contains only one class) ---")
 
+# =========================================================
+# STEP 5: FORECASTING PHASE (YEAR 9)
+# =========================================================
+print("\n--- PHASE 2: Final Forecasting")
+
+rf_final = RandomForestClassifier(n_estimators=500, random_state=42, class_weight='balanced', max_depth=5, min_samples_leaf=3)
+rf_final.fit(final_train[features], final_train[target])
+
+y_final_prob = rf_final.predict_proba(final_predict[features])[:, 1]
+y_final_pred = (y_final_prob >= THRESHOLD).astype(int)
+
 importances = pd.DataFrame({
     'Feature': features,
-    'Importance': rf.feature_importances_
+    'Importance': rf_final.feature_importances_
 }).sort_values(by='Importance', ascending=False)
 
 plt.figure(figsize=(10,6))
-sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis')
+sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis', hue='Feature', legend=False)
 plt.title('Why Do Coaches Get Fired? (Feature Importance)')
 plt.xlabel('Importance')
 plt.ylabel('Feature')
@@ -179,9 +181,10 @@ plt.savefig("results/plots/coach_firing_factors.png")
 # =========================================================
 # STEP 6: SAVE PREDICTIONS
 # =========================================================
-results = test_df[['tmID', 'coachID', 'year', 'win_pct', 'underperformance', 'recent_post_success']].copy()
-results['firing_probability'] = y_prob
-results['predicted_change'] = y_pred_custom
+results = final_predict[['tmID', 'coachID', 'year', 'win_pct', 'underperformance', 'recent_post_success']].copy()
+
+results['firing_probability'] = y_final_prob
+results['predicted_change'] = y_final_pred
 
 hot_seat = results.sort_values('firing_probability', ascending=False)
 

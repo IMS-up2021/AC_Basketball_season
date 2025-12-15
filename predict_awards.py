@@ -6,12 +6,12 @@ import seaborn as sns
 from xgboost import XGBRanker
 
 # =========================================================
-# CONFIGURAÇÃO
+# CONFIGURATION
 # =========================================================
 PREDICTION_YEAR = 11
 LAST_TRAIN_YEAR = 10
 
-# Setup visual
+# Visual Setup (Seaborn Style)
 sns.set_style("whitegrid")
 output_dir = "results/predictions"
 plot_dir = "results/plots"
@@ -23,7 +23,7 @@ print(f"AWARD PREDICTIONS (FINAL FIX) - SEASON {PREDICTION_YEAR}")
 print(f"========================================================")
 
 # =========================================================
-# 1. CARREGAR DADOS
+# 1. LOAD DATA
 # =========================================================
 data_path = "data/cleaned/full_dataset_prepared.csv"
 rankings_path = f"results/predictions/season_{PREDICTION_YEAR}_rankings.csv"
@@ -37,7 +37,7 @@ df = pd.read_csv(data_path)
 awards_df = pd.read_csv(awards_path)
 players_df = pd.read_csv(players_path)
 
-# Normalização de Nomes e Colunas
+# Normalize Conference Names
 if 'confID' not in df.columns:
     col_map = {'lgID_x': 'conference', 'lgID': 'conference', 'confID': 'conference'}
     df.rename(columns={k: v for k, v in col_map.items() if k in df.columns}, inplace=True)
@@ -45,13 +45,14 @@ else:
     df.rename(columns={'confID': 'conference'}, inplace=True)
 df['conference'] = df['conference'].fillna('Unknown')
 
+# Normalize IDs
 df['playerID'] = df['playerID'].astype(str).str.upper()
 awards_df['playerID'] = awards_df['playerID'].astype(str).str.upper()
 if 'bioID' in players_df.columns:
     players_df.rename(columns={'bioID': 'playerID'}, inplace=True)
 players_df['playerID'] = players_df['playerID'].astype(str).str.upper()
 
-# Nome Completo
+# Full Name Creation
 if 'firstName' in players_df.columns and 'lastName' in players_df.columns:
     players_df['fullName'] = players_df['firstName'] + " " + players_df['lastName']
 else:
@@ -60,7 +61,7 @@ else:
 df = df.merge(players_df[['playerID', 'fullName']], on='playerID', how='left')
 df['fullName'] = df['fullName'].fillna(df['playerID'])
 
-# Carregar Rankings S11
+# Load Season 11 Rankings
 pred_win_map = {}
 pred_rank_map = {}
 if os.path.exists(rankings_path):
@@ -102,7 +103,7 @@ for award in target_awards:
     df[col_name] = df[col_name].fillna(0)
 
 # =========================================================
-# 3. PROJEÇÃO DE STATS PARA SEASON 11
+# 3. STATS PROJECTION FOR SEASON 11
 # =========================================================
 print("--> Projecting stats for Season 11...")
 
@@ -116,7 +117,7 @@ s9_stats = df[df['year'] == (LAST_TRAIN_YEAR - 1)][['playerID', 'efficiency_pg']
 s9_stats.rename(columns={'efficiency_pg': 'efficiency_pg_2yrs_ago'}, inplace=True)
 s11_proj = s11_proj.merge(s9_stats, on='playerID', how='left')
 
-# Injetar Win Pct ANTES de calcular stats (para ajustar rookies)
+# Inject Win Pct BEFORE calculating stats (to adjust rookies based on opportunity)
 s11_proj['win_pct'] = s11_proj['tmID'].map(pred_win_map).fillna(0.5)
 s11_proj['conf_rank'] = s11_proj['tmID'].map(pred_rank_map).fillna(3)
 
@@ -127,21 +128,21 @@ for col in cols_to_project:
     prev_col = f"{col}_prev"
     s11_proj[col] = s11_proj[prev_col]
     
-    # --- ROOKIES: PROJEÇÃO BASEADA EM OPORTUNIDADE ---
+    # --- ROOKIES: OPPORTUNITY-BASED PROJECTION ---
     is_rookie_missing = (s11_proj['experience_years'] == 0) & (s11_proj[col].isna())
     
     if not s11_proj.loc[is_rookie_missing].empty:
-        # Se a equipa ganha pouco (win_pct baixo), o rookie joga mais (Factor > 1.0)
-        # Se a equipa ganha muito (win_pct alto), o rookie joga menos (Factor < 1.0)
+        # If team wins little (low win_pct), rookie plays more (Factor > 1.0)
+        # If team wins a lot (high win_pct), rookie plays less (Factor < 1.0)
         opp_factor = 1.6 - (s11_proj.loc[is_rookie_missing, 'win_pct'] * 1.0)
         
-        # Ruído aleatório (0.8 a 1.2)
+        # Random noise (0.8 to 1.2)
         noise = np.random.uniform(0.8, 1.2, size=is_rookie_missing.sum())
         
-        # Atribuir valor: (Média da Liga * 0.6) * Oportunidade * Ruído
+        # Assign value: (League Avg * 0.6) * Opportunity * Noise
         s11_proj.loc[is_rookie_missing, col] = (league_avg_s10[col] * 0.6) * opp_factor * noise
     
-    # VETERANOS SEM DADOS
+    # VETERANS WITHOUT DATA
     is_vet_missing = (s11_proj['experience_years'] > 0) & (s11_proj[col].isna())
     if not s11_proj.loc[is_vet_missing].empty:
         s11_proj.loc[is_vet_missing, col] = league_avg_s10[col] * 0.9
@@ -152,7 +153,7 @@ s11_proj['is_best_player'] = (s11_proj['efficiency_pg'] == team_max_eff).astype(
 s11_proj['improvement_trend'] = s11_proj['efficiency_pg'] - s11_proj['efficiency_pg_2yrs_ago'].fillna(s11_proj['efficiency_pg'] * 0.8)
 
 # =========================================================
-# 4. PREPARAR TREINO
+# 4. PREPARE TRAINING DATA
 # =========================================================
 print("--> Preparing training data...")
 train_df = df[df['year'] <= LAST_TRAIN_YEAR].copy()
@@ -173,7 +174,7 @@ train_df['is_best_player'] = (train_df['efficiency_pg'] == train_max_eff).astype
 train_df['improvement_trend'] = train_df.groupby('playerID')['efficiency_pg'].diff().fillna(0)
 
 # =========================================================
-# 5. FUNÇÃO DE PREVISÃO COM DESEMPATE
+# 5. PREDICTION FUNCTION WITH TIE-BREAKER
 # =========================================================
 
 def get_probs(scores):
@@ -208,26 +209,26 @@ def run_race(award_name, features, filters=None):
     scores = model.predict(X_test)
     test_set['raw_score'] = scores
     
-    # --- DESEMPATE (TIE-BREAKER) ---
-    # Se os scores do modelo forem muito parecidos (o que causa os 20% iguais),
-    # adicionamos uma fração das stats projetadas ao score para forçar o desempate.
+    # --- TIE-BREAKER LOGIC ---
+    # If model scores are too similar (causing 20% splits),
+    # we add a fraction of projected stats to the score to force separation.
     if award_name == 'Rookie of the Year':
-        # Usa Efficiency e Points como desempate
+        # Use Efficiency and Points as tie-breaker
         tie_breaker = (test_set['efficiency_pg'] * 0.1) + (test_set['points_pg'] * 0.1)
         test_set['raw_score'] += tie_breaker
     
     elif award_name == 'Most Improved Player':
-        # Usa a Improvement Trend como desempate
+        # Use Improvement Trend as tie-breaker
         test_set['raw_score'] += test_set['improvement_trend'] * 0.2
 
-    # Normalizar e Selecionar Top 5
+    # Normalize and Select Top 5
     results = test_set.sort_values('raw_score', ascending=False).head(5).copy()
     results['probability'] = get_probs(results['raw_score'].values)
     
     race_results[award_name] = results[['fullName', 'tmID', 'probability']]
     print(f"Computed {award_name} -> Leader: {results.iloc[0]['fullName']} ({results.iloc[0]['tmID']})")
 
-# Executar modelos
+# Run Models
 run_race('Most Valuable Player', ['efficiency_pg', 'points_pg', 'win_pct', 'conf_rank', 'is_best_player'])
 run_race('Rookie of the Year', ['points_pg', 'rebounds_pg', 'efficiency_pg'], lambda x: x['experience_years'] == 0)
 run_race('Defensive Player of the Year', ['steals_pg', 'blocks_pg', 'rebounds_pg', 'win_pct', 'efficiency_pg'])
@@ -235,7 +236,7 @@ run_race('Sixth Woman of the Year', ['points_pg', 'efficiency_pg', 'win_pct', 's
 run_race('Most Improved Player', ['improvement_trend', 'points_pg', 'efficiency_pg'], lambda x: x['experience_years'] > 1)
 
 # =========================================================
-# 6. EXPORTAR E VISUALIZAR
+# 6. EXPORT AND VISUALIZE
 # =========================================================
 if race_results:
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -272,7 +273,7 @@ if race_results:
     plt.savefig(plot_path, dpi=300)
     print(f"\n--> Visualizations saved to: {plot_path}")
 
-    # CSV
+    # CSV Export
     results_for_csv = []
     for award, df_res in race_results.items():
         results_for_csv.append(df_res.assign(Award=award))
